@@ -1,6 +1,5 @@
 /*
  * Mxmmap - Memory Analyzer for Windows
- * Herramienta ligera para analizar, mapear y visualizar el uso de memoria RAM.
  *
  * Uso:
  *   Mxmmap.exe --list
@@ -22,20 +21,23 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cctype>
+
+#include "mxmmap.h"
 
 #pragma comment(lib, "psapi.lib")
 
-#define MXMMAP_VERSION "0.1.0"
+// ---------- Implementacion de utilidades del namespace ----------
 
-// ---------- Utilidades ----------
+namespace mxmmap {
 
-static std::string toLower(std::string s) {
+std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
 }
 
-static std::string formatBytes(SIZE_T bytes) {
+std::string formatBytes(std::uint64_t bytes) {
     const char* units[] = { "B", "KB", "MB", "GB", "TB" };
     double value = static_cast<double>(bytes);
     int idx = 0;
@@ -48,7 +50,7 @@ static std::string formatBytes(SIZE_T bytes) {
     return std::string(buffer);
 }
 
-static const char* memStateToString(DWORD state) {
+const char* memStateToString(unsigned long state) {
     switch (state) {
         case MEM_COMMIT:  return "COMMIT";
         case MEM_RESERVE: return "RESERVE";
@@ -57,7 +59,7 @@ static const char* memStateToString(DWORD state) {
     }
 }
 
-static const char* memTypeToString(DWORD type) {
+const char* memTypeToString(unsigned long type) {
     switch (type) {
         case MEM_IMAGE:   return "IMAGE";
         case MEM_MAPPED:  return "MAPPED";
@@ -66,7 +68,7 @@ static const char* memTypeToString(DWORD type) {
     }
 }
 
-static const char* protectToString(DWORD prot) {
+const char* protectToString(unsigned long prot) {
     switch (prot) {
         case PAGE_NOACCESS:          return "NOACCESS";
         case PAGE_READONLY:          return "R";
@@ -82,6 +84,10 @@ static const char* protectToString(DWORD prot) {
     }
 }
 
+} // namespace mxmmap
+
+using namespace mxmmap;
+
 // ---------- Banner ----------
 
 static void printBanner() {
@@ -91,11 +97,6 @@ static void printBanner() {
 }
 
 // ---------- Procesos ----------
-
-struct ProcessInfo {
-    DWORD pid;
-    std::string name;
-};
 
 static std::vector<ProcessInfo> snapshotProcesses() {
     std::vector<ProcessInfo> list;
@@ -108,7 +109,7 @@ static std::vector<ProcessInfo> snapshotProcesses() {
     if (Process32First(snap, &pe)) {
         do {
             ProcessInfo info;
-            info.pid = pe.th32ProcessID;
+            info.pid  = pe.th32ProcessID;
             info.name = pe.szExeFile;
             list.push_back(info);
         } while (Process32Next(snap, &pe));
@@ -133,13 +134,13 @@ static bool enableDebugPrivilege() {
         return false;
     }
 
-    BOOL ok = AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+    BOOL ok  = AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), nullptr, nullptr);
     DWORD err = GetLastError();
     CloseHandle(hToken);
     return ok && err == ERROR_SUCCESS;
 }
 
-// ---------- Análisis de un proceso ----------
+// ---------- Analisis de un proceso ----------
 
 static void analyzeProcess(DWORD pid, const std::string& exportFile = "") {
     HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
@@ -164,7 +165,6 @@ static void analyzeProcess(DWORD pid, const std::string& exportFile = "") {
         if (out.is_open()) out << line << "\n";
     };
 
-    // Nombre del proceso
     char exeName[MAX_PATH] = { 0 };
     DWORD nameSize = MAX_PATH;
     std::string procName = "<desconocido>";
@@ -177,7 +177,6 @@ static void analyzeProcess(DWORD pid, const std::string& exportFile = "") {
     emit("PID     : " + std::to_string(pid));
     emit("-----------------------------------------");
 
-    // Memoria
     PROCESS_MEMORY_COUNTERS_EX pmc = {};
     pmc.cb = sizeof(pmc);
     if (GetProcessMemoryInfo(hProc,
@@ -191,7 +190,6 @@ static void analyzeProcess(DWORD pid, const std::string& exportFile = "") {
         emit("[!] No se pudo obtener informacion de memoria.");
     }
 
-    // Regiones de memoria
     MEMORY_BASIC_INFORMATION mbi;
     unsigned char* addr = nullptr;
     SIZE_T totalCommitted = 0;
@@ -208,7 +206,6 @@ static void analyzeProcess(DWORD pid, const std::string& exportFile = "") {
         if (mbi.State == MEM_FREE)    totalFree      += mbi.RegionSize;
         ++regionCount;
 
-        // Solo mostramos las primeras 20 para no saturar la salida
         if (regionCount <= 20) {
             char line[256];
             std::snprintf(line, sizeof(line),
@@ -223,10 +220,9 @@ static void analyzeProcess(DWORD pid, const std::string& exportFile = "") {
         }
 
         unsigned char* next = static_cast<unsigned char*>(mbi.BaseAddress) + mbi.RegionSize;
-        if (next <= addr) break; // evitar bucle infinito
+        if (next <= addr) break;
         addr = next;
 
-        // Limite practico en sistemas de 64 bits
         if (reinterpret_cast<uintptr_t>(addr) >= 0x7FFFFFFFFFFFULL) break;
     }
 
@@ -281,7 +277,7 @@ static void listModules(DWORD pid) {
     CloseHandle(snap);
 }
 
-// ---------- Helpers de busqueda ----------
+// ---------- Helpers ----------
 
 static DWORD findPidByName(const std::string& name) {
     std::string target = toLower(name);
@@ -291,8 +287,6 @@ static DWORD findPidByName(const std::string& name) {
     }
     return 0;
 }
-
-// ---------- Main ----------
 
 static void printUsage() {
     std::cout << "Uso:\n";
@@ -304,6 +298,8 @@ static void printUsage() {
     std::cout << "  Mxmmap --help                     Muestra esta ayuda\n\n";
 }
 
+// ---------- Main ----------
+
 int main(int argc, char* argv[]) {
     printBanner();
 
@@ -312,7 +308,6 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // Intentamos habilitar SeDebugPrivilege (silenciosamente si falla)
     enableDebugPrivilege();
 
     std::string cmd = toLower(argv[1]);
